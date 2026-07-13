@@ -6,6 +6,9 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
+# Absolute project root — ensures logo paths resolve correctly on Cloud
+_PROJECT_ROOT = Path(__file__).parent.parent
+
 
 def _resolve_logo_path(logo_path, league_data_dir=None):
     """Resolve a team logo path relative to the active league data directory."""
@@ -18,15 +21,26 @@ def _resolve_logo_path(logo_path, league_data_dir=None):
 
     search_roots = []
     if league_data_dir:
-        search_roots.append(Path(league_data_dir))
-    search_roots.extend([Path("data/isl"), Path("data/epl"), Path("data")])
+        p = Path(league_data_dir)
+        # Accept both absolute and project-root-relative league_data_dir
+        search_roots.append(p if p.is_absolute() else _PROJECT_ROOT / p)
+    # Always search using absolute project-root paths so Cloud CWD doesn't matter
+    search_roots.extend([
+        _PROJECT_ROOT / "data" / "isl",
+        _PROJECT_ROOT / "data" / "epl",
+        _PROJECT_ROOT / "data",
+        _PROJECT_ROOT,
+    ])
 
     for base in search_roots:
-        resolved = base / candidate
-        if resolved.exists():
-            return resolved
+        try:
+            resolved = base / candidate
+            if resolved.exists():
+                return resolved
+        except Exception:
+            continue
 
-    return candidate if candidate.exists() else None
+    return None
 
 def display_match_result(match, show_venue=True, show_gameweek=True):
     """

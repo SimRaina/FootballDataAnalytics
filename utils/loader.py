@@ -1,11 +1,20 @@
 import json
+import os
 from pathlib import Path
 import pandas as pd
 import streamlit as st
 
 # Constant encoding for all CSV files
 CSV_ENCODING = "latin-1"
-CONFIG_PATH = Path("config/league_config.json")
+
+# Absolute project root — works regardless of working directory (fixes Cloud path issues)
+_PROJECT_ROOT = Path(__file__).parent.parent
+CONFIG_PATH = _PROJECT_ROOT / "config" / "league_config.json"
+
+
+def _is_cloud_env() -> bool:
+    """Return True when running on Streamlit Community Cloud."""
+    return os.environ.get("STREAMLIT_SHARING_MODE", "").lower() == "streamlit"
 
 
 def _read_config_file():
@@ -141,11 +150,26 @@ def load_data(force_csv=False, league_config=None):
     if league_config is None:
         league_config = get_configured_league()
 
-    data_dir = Path(league_config.get("data_dir", "data"))
+    # Resolve data_dir to an absolute path so it works on Cloud regardless of CWD
+    raw_data_dir = Path(league_config.get("data_dir", "data"))
+    data_dir = raw_data_dir if raw_data_dir.is_absolute() else _PROJECT_ROOT / raw_data_dir
+
+    # Validate required files exist before attempting to read them
+    required_files = ["teams.csv", "players.csv", "matches.csv", "seasons.csv"]
+    missing = [f for f in required_files if not (data_dir / f).exists()]
+    if missing:
+        st.error(
+            f"Required data files not found in `{data_dir}`: {', '.join(missing)}. "
+            "Please check the data directory configuration."
+        )
+        st.stop()
+
+    # Pickle cache is skipped on Cloud (ephemeral filesystem + category-dtype
+    # serialization issues) and relied on only locally for speed.
+    use_pickle = not _is_cloud_env()
     processed_cache = data_dir / "processed.pkl"
 
-    # If processed cache exists, load it (fast)
-    if processed_cache.exists() and not force_csv:
+    if use_pickle and processed_cache.exists() and not force_csv:
         try:
             data = pd.read_pickle(processed_cache)
             return (
@@ -156,15 +180,24 @@ def load_data(force_csv=False, league_config=None):
                 data.get("teams_socials", pd.DataFrame()),
             )
         except Exception:
-            # Fall back to CSV if pickle is corrupted
+            # Fall back to CSV if pickle is corrupted or version-mismatched
             pass
 
     # Read CSVs with basic parsing
-    teams = pd.read_csv(data_dir / "teams.csv", encoding=CSV_ENCODING, low_memory=False)
-    players = pd.read_csv(data_dir / "players.csv", encoding=CSV_ENCODING, low_memory=False)
-    matches = pd.read_csv(data_dir / "matches.csv", encoding=CSV_ENCODING, low_memory=False, parse_dates=["date"], dayfirst=True)
-    seasons = pd.read_csv(data_dir / "seasons.csv", encoding=CSV_ENCODING, low_memory=False)
-    teams_socials = pd.read_csv(data_dir / "teams_socials.csv", encoding=CSV_ENCODING, low_memory=False)
+    try:
+        teams = pd.read_csv(data_dir / "teams.csv", encoding=CSV_ENCODING, low_memory=False)
+        players = pd.read_csv(data_dir / "players.csv", encoding=CSV_ENCODING, low_memory=False)
+        matches = pd.read_csv(data_dir / "matches.csv", encoding=CSV_ENCODING, low_memory=False, parse_dates=["date"], dayfirst=True)
+        seasons = pd.read_csv(data_dir / "seasons.csv", encoding=CSV_ENCODING, low_memory=False)
+        teams_socials_path = data_dir / "teams_socials.csv"
+        teams_socials = (
+            pd.read_csv(teams_socials_path, encoding=CSV_ENCODING, low_memory=False)
+            if teams_socials_path.exists()
+            else pd.DataFrame()
+        )
+    except Exception as exc:
+        st.error(f"Failed to load data files: {exc}")
+        st.stop()
 
     # Normalize numeric columns safely
     numeric_match_cols = ["home_goals", "away_goals", "gameweek"]
@@ -179,29 +212,33 @@ def load_data(force_csv=False, league_config=None):
             if col != "minutes":
                 players[col] = players[col].astype(int)
 
-    # Convert low-cardinality text columns to category to save memory
-    if "team_name" in teams.columns:
-        teams["team_name"] = teams["team_name"].astype("category")
-    for col in ["team", "position", "nationality"]:
-        if col in players.columns:
-            players[col] = players[col].astype("category")
-    for col in ["home_team", "away_team", "match_status", "season", "venue"]:
-        if col in matches.columns:
-            matches[col] = matches[col].astype("category")
+    # Convert low-cardinality text columns to category to save memory.
+    # Skipped on Cloud because category dtypes can fail to serialize across
+    # different Pandas/Python versions (pickle compatibility issue).
+    if not _is_cloud_env():
+        if "team_name" in teams.columns:
+            teams["team_name"] = teams["team_name"].astype("category")
+        for col in ["team", "position", "nationality"]:
+            if col in players.columns:
+                players[col] = players[col].astype("category")
+        for col in ["home_team", "away_team", "match_status", "season", "venue"]:
+            if col in matches.columns:
+                matches[col] = matches[col].astype("category")
 
-    # Save processed cache for faster subsequent loads
-    try:
-        processed = {
-            "teams": teams,
-            "players": players,
-            "matches": matches,
-            "seasons": seasons,
-            "teams_socials": teams_socials,
-        }
-        pd.to_pickle(processed, processed_cache)
-    except Exception:
-        # silently continue if we cannot write cache
-        pass
+    # Save processed cache locally for faster subsequent loads (skipped on Cloud)
+    if use_pickle:
+        try:
+            processed = {
+                "teams": teams,
+                "players": players,
+                "matches": matches,
+                "seasons": seasons,
+                "teams_socials": teams_socials,
+            }
+            pd.to_pickle(processed, processed_cache)
+        except Exception:
+            # silently continue if we cannot write cache
+            pass
 
     return teams, players, matches, seasons, teams_socials
 
