@@ -39,6 +39,12 @@ NATION_MAP = {
     "ng": "Nigeria",
     "fr": "France",
     "jp": "Japan",
+    "ba": "Bosnia and Herzegovina",
+    "sn": "Senegal",
+    "ma": "Morocco",
+    "de": "Germany",
+    "lt": "Lithuania",
+    "py": "Paraguay",
 }
 
 # Position abbreviation -> full name
